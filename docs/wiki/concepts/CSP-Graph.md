@@ -4,6 +4,7 @@
 - [Anatomy of a `csp.graph`](#anatomy-of-a-cspgraph)
 - [Graph Propagation and Single-dispatch](#graph-propagation-and-single-dispatch)
 - [Graph Pruning](#graph-pruning)
+- [Graph Memoization](#graph-memoization)
 - [Collecting Graph Outputs](#collecting-graph-outputs)
 
 ## Anatomy of a `csp.graph`
@@ -55,6 +56,72 @@ Any node in a graph that is not connected to an output will be pruned from the g
 An output is defined as either an output adapter or a `csp.node` without any outputs of its own.
 Pruning is an optimization which avoids executing nodes whose result will be discarded.
 As a result, it's best practice for any `csp.node` to be \***side-effect free**; they shouldn't mutate any state outside of the node.
+
+## Graph Memoization
+
+By default, CSP **memoizes node and graph instantiation while building a graph**.
+Calling the same `@csp.node` or `@csp.graph` with equivalent inputs in the
+same graph-building context reuses the previously created object rather than
+creating another instance. This is particularly useful when different parts of
+a graph refer to the same calculation: they share its runtime state and work.
+
+The following runnable example demonstrates both behaviors:
+
+```python
+from datetime import datetime, timedelta
+
+import csp
+from csp import ts
+
+
+@csp.node
+def identity(x: ts[int]) -> ts[int]:
+    if csp.ticked(x):
+        return x
+
+
+@csp.graph
+def example():
+    source = csp.const(10)
+    first = identity(source)
+    second = identity(source)
+    assert first is second  # The same node/edge is reused.
+
+    with csp.memoize(False):
+        independent = identity(source)
+    assert independent is not first  # A separate node was instantiated.
+
+    csp.add_graph_output("shared", first)
+    csp.add_graph_output("independent", independent)
+
+
+result = csp.run(example, starttime=datetime(2026, 1, 1), endtime=timedelta(seconds=1))
+assert [value for _, value in result["shared"]] == [10]
+assert [value for _, value in result["independent"]] == [10]
+```
+
+There are two ways to opt out:
+
+- Use `@csp.node(memoize=False)` or `@csp.graph(memoize=False)` when **every**
+  call to a particular definition should create a separate instance.
+- Use `with csp.memoize(False):` when only a particular part of graph construction
+  should bypass the cache. This setting can be nested and restored with
+  `with csp.memoize(True):` inside the disabled region.
+
+For example, a node with independently generated random events should generally
+use `memoize=False` if multiple calls with the same parameters must represent
+*independent* processes; the [Poisson counter tutorial](More-with-CSP) does this.
+Conversely, when two consumers must observe the **same** stateful stream,
+preserving the default memoization avoids accidentally creating a second one.
+
+Memoization is about **graph construction**, not caching each tick's computed
+values or persisting results between separate `csp.run` calls. Cache keys are
+based on the definition and normalized arguments, including input edges and
+scalar parameters. Avoid relying on external mutable state or side effects in
+graph-building functions: a cache hit means the function body need not execute
+again. `force_memoize=True` exists for definitions whose correctness requires
+memoization even when a surrounding context disables it, and should be used
+only when that invariant is necessary.
 
 ## Executing a Graph
 
